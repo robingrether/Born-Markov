@@ -232,7 +232,7 @@ class BornMarkovSolver:
         return current
     
 	
-def general_solver(H_s_tot, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R):
+def general_solver(H_s_tot, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, diagonalize=numpy.linalg.eig):
     def f_L(E):
         return 1 / (numpy.exp((E - mu_L)/(k_B * T_L)) + 1)
     
@@ -258,7 +258,7 @@ def general_solver(H_s_tot, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R):
     #    V = V_dag = numpy.identity(N)
     #    W = H_s_tot
     #else:
-    w, V = numpy.linalg.eig(H_s_tot)
+    w, V = diagonalize(H_s_tot)
     W = numpy.diag(w)
     V_dag = Hc(V)
     
@@ -316,7 +316,10 @@ def general_solver(H_s_tot, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R):
                 D2_L[i].append(zero_op)
                 D2_R[i].append(zero_op)
     
-    return BornMarkovSolver(W, d_ops_T, D1, D2, D1_L, D2_L, D1_R, D2_R)
+    solver = BornMarkovSolver(W, d_ops_T, D1, D2, D1_L, D2_L, D1_R, D2_R)
+    solver.V = V
+    solver.V_dag = V_dag
+    return solver
             
 
 def create_holstein_solver_via_diagonalization(e_0, omega, lamda, N, Gamma, mu_L, mu_R, T_L, T_R):
@@ -572,15 +575,16 @@ def create_anderson_hopping_solver(e_1, e_2, U, t, Gamma, mu_L, mu_R, T_L, T_R):
     return general_solver(H_S, [d_1, d_2], [], Gamma * numpy.ones((2,2)), mu_L, mu_R, T_L, T_R)
    
   
-def calc_langevin_quantities(H_s_func, ddx_H_s_func, x, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, use_pinv=False):
+def calc_langevin_quantities(H_s_func, ddx_H_s_func, x, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, use_pinv=False, diagonalize=numpy.linalg.eig):
     xs = len(x)
     
     mean_force = numpy.zeros(xs, dtype=numpy.complex128)
     friction = numpy.zeros((xs, xs), dtype=numpy.complex128)
     correlation = numpy.zeros((xs, xs), dtype=numpy.complex128)
     
-    solver = general_solver(H_s_func(x), d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R)
+    solver = general_solver(H_s_func(x), d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, diagonalize=diagonalize)
     rho_ss, L = solver.find_steady_state()
+    V, V_dag = solver.V, solver.V_dag
     if use_pinv:
         L_inv = linalg.pinv(L)
     
@@ -588,7 +592,9 @@ def calc_langevin_quantities(H_s_func, ddx_H_s_func, x, d_ops, a_ops, Gammas, mu
     dx = 1e-4
     
     for nu in range(xs):
-        mean_force[nu] = -numpy.trace(ddx_H_s_func(nu, x) @ rho_ss)
+        ddx_H_s_nu = V_dag @ ddx_H_s_func(nu, x) @ V
+        
+        mean_force[nu] = -numpy.trace(ddx_H_s_nu @ rho_ss)
         
         vec_dx = numpy.zeros(xs)
         vec_dx[nu] = dx
@@ -597,10 +603,11 @@ def calc_langevin_quantities(H_s_func, ddx_H_s_func, x, d_ops, a_ops, Gammas, mu
         for i in (list(range(-N, 0)) + list(range(1, N+1))):
             H_temp = H_s_func(x + i*vec_dx)
             #solver = create_single_level_solver(H_temp[1,1]-H_temp[0,0], Gammas[0][0], mu_L, mu_R, T_L, T_R)
-            solver = general_solver(H_temp, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R)
+            solver2 = general_solver(H_temp, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, diagonalize=diagonalize)
             #print(solver.H_S)
-            rho, L2 = solver.find_steady_state()
-            rhos.append(rho)
+            rho, L2 = solver2.find_steady_state()
+            V2, V2_dag = solver2.V, solver2.V_dag
+            rhos.append(V2 @ rho @ V2_dag)
         if N == 2:
             coeff = [1/12, -2/3, 2/3, -1/12]
         elif N == 1:
@@ -609,14 +616,17 @@ def calc_langevin_quantities(H_s_func, ddx_H_s_func, x, d_ops, a_ops, Gammas, mu
         for rho, c in zip(rhos, coeff):
             ddx_rho += rho * c
         ddx_rho /= dx
+        ddx_rho = V_dag @ ddx_rho @ V
         
         for alpha in range(xs):
             
+            ddx_H_s_alpha = V_dag @ ddx_H_s_func(alpha, x) @ V
+            
             if use_pinv:
-                friction[alpha, nu] = numpy.trace(ddx_H_s_func(alpha, x) @ ((L_inv @ ddx_rho.flatten(order='F')).reshape(ddx_rho.shape, order='F')))
-                correlation[alpha, nu] = -0.5 * numpy.trace(ddx_H_s_func(alpha, x) @ ((L_inv @ (numpy.kron(numpy.identity(rho_ss.shape[0]), ddx_H_s_func(nu, x)) + numpy.kron(numpy.transpose(ddx_H_s_func(nu, x)), numpy.identity(rho_ss.shape[0])) + 2 * mean_force[nu] * numpy.identity(L.shape[0])) @ rho_ss.flatten(order='F')).reshape(rho_ss.shape, order='F')))
+                friction[alpha, nu] = numpy.trace(ddx_H_s_alpha @ ((L_inv @ ddx_rho.flatten(order='F')).reshape(ddx_rho.shape, order='F')))
+                correlation[alpha, nu] = -0.5 * numpy.trace(ddx_H_s_alpha @ ((L_inv @ (numpy.kron(numpy.identity(rho_ss.shape[0]), ddx_H_s_nu) + numpy.kron(numpy.transpose(ddx_H_s_nu), numpy.identity(rho_ss.shape[0])) + 2 * mean_force[nu] * numpy.identity(L.shape[0])) @ rho_ss.flatten(order='F')).reshape(rho_ss.shape, order='F')))
             else:
-                friction[alpha, nu] = integrate.quad(lambda lamda: numpy.trace(ddx_H_s_func(alpha, x) @ ((-linalg.expm(L * lamda) @ ddx_rho.flatten(order='F')).reshape(ddx_rho.shape, order='F')), dtype=numpy.float64), 0, 1e3)[0]
-                correlation[alpha, nu] = -0.5 * integrate.quad(lambda lamda: numpy.trace(ddx_H_s_func(alpha, x) @ ((-linalg.expm(L * lamda) @ (numpy.kron(numpy.identity(rho_ss.shape[0]), ddx_H_s_func(nu, x)) + numpy.kron(numpy.transpose(ddx_H_s_func(nu, x)), numpy.identity(rho_ss.shape[0])) + 2 * mean_force[nu] * numpy.identity(L.shape[0])) @ rho_ss.flatten(order='F')).reshape(rho_ss.shape, order='F')), dtype=numpy.float64), 0, 1e3)[0]
+                friction[alpha, nu] = integrate.quad(lambda lamda: numpy.trace(ddx_H_s_alpha @ ((-linalg.expm(L * lamda) @ ddx_rho.flatten(order='F')).reshape(ddx_rho.shape, order='F')), dtype=numpy.float64), 0, 1e3)[0]
+                correlation[alpha, nu] = -0.5 * integrate.quad(lambda lamda: numpy.trace(ddx_H_s_alpha @ ((-linalg.expm(L * lamda) @ (numpy.kron(numpy.identity(rho_ss.shape[0]), ddx_H_s_nu) + numpy.kron(numpy.transpose(ddx_H_s_nu), numpy.identity(rho_ss.shape[0])) + 2 * mean_force[nu] * numpy.identity(L.shape[0])) @ rho_ss.flatten(order='F')).reshape(rho_ss.shape, order='F')), dtype=numpy.float64), 0, 1e3)[0]
             
     return mean_force, friction, correlation
