@@ -3,9 +3,14 @@ from scipy import linalg, special, integrate
 from scipy.integrate import solve_ivp
 import types
 
-hbar = 0.6582   # reduced Planck constant in units eV*fs
-_hbar = 1.519   # inverse reduced Planck constant in units 1/(eV*fs)
-k_B = 8.617e-5  # Boltzmann constant in units eV/K
+hbar = 0.65821195695091   # reduced Planck constant in units eV*fs
+_hbar = 1 / hbar          # inverse reduced Planck constant in units 1/(eV*fs)
+k_B = 8.6173332621452e-5  # Boltzmann constant in units eV/K
+
+#hbar = 1
+#_hbar = 1
+#k_B = 1
+    
 
 def Hc(A):
     return (A.T).conj()
@@ -123,8 +128,8 @@ class BornMarkovSolver:
         part1 = numpy.zeros((n**2, n**2), dtype=numpy.complex128)
         for i in range(self.N):
             for j in range(self.N):
-                print(self.d_ops[i])
-                print(self.D1[i][j])
+                #print(self.d_ops[i])
+                #print(self.D1[i][j])
                 A = numpy.kron(unity, self.d_ops[i] @ self.D1[i][j])
                 B = numpy.kron(numpy.transpose(self.D2[i][j]), self.d_ops[i])
                 C = numpy.kron(numpy.transpose(self.d_ops[i]), self.D1[i][j])
@@ -202,6 +207,7 @@ class BornMarkovSolver:
         
         if null_space.shape[-1] != 1:
             print("ALARM!!! ", null_space.shape[-1], "/", L.shape[-1], sep="")
+            raise ValueError
         
         rho_ss = numpy.reshape(null_space[:,0], self.H_S.shape, order='F')
         rho_ss /= numpy.sum(numpy.diag(rho_ss))
@@ -232,7 +238,7 @@ class BornMarkovSolver:
         return current
     
 	
-def general_solver(H_s_tot, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, diagonalize=numpy.linalg.eig):
+def general_solver(H_s_tot, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, diagonalize=numpy.linalg.eig, include_digamma=True):
     def f_L(E):
         return 1 / (numpy.exp((E - mu_L)/(k_B * T_L)) + 1)
     
@@ -240,10 +246,16 @@ def general_solver(H_s_tot, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, diagonal
         return 1 / (numpy.exp((E - mu_R)/(k_B * T_R)) + 1)
     
     def psi_L(E):
-        return special.digamma(0.5 + 1j * (E - mu_L)/(2 * numpy.pi * k_B * T_L)).real / numpy.pi
+        if include_digamma:
+            return special.digamma(0.5 + 1j * (E - mu_L)/(2 * numpy.pi * k_B * T_L)).real / numpy.pi
+        else:
+            return 0
     
     def psi_R(E):
-        return special.digamma(0.5 + 1j * (E - mu_R)/(2 * numpy.pi * k_B * T_R)).real / numpy.pi
+        if include_digamma:
+            return special.digamma(0.5 + 1j * (E - mu_R)/(2 * numpy.pi * k_B * T_R)).real / numpy.pi
+        else:
+            return 0
     
     n = len(d_ops)
     N = H_s_tot.shape[0]
@@ -575,14 +587,14 @@ def create_anderson_hopping_solver(e_1, e_2, U, t, Gamma, mu_L, mu_R, T_L, T_R):
     return general_solver(H_S, [d_1, d_2], [], Gamma * numpy.ones((2,2)), mu_L, mu_R, T_L, T_R)
    
   
-def calc_langevin_quantities(H_s_func, ddx_H_s_func, x, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, use_pinv=False, diagonalize=numpy.linalg.eig):
+def calc_langevin_quantities(H_s_func, ddx_H_s_func, x, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, use_pinv=False, diagonalize=numpy.linalg.eig, include_digamma=True):
     xs = len(x)
     
     mean_force = numpy.zeros(xs, dtype=numpy.complex128)
     friction = numpy.zeros((xs, xs), dtype=numpy.complex128)
     correlation = numpy.zeros((xs, xs), dtype=numpy.complex128)
     
-    solver = general_solver(H_s_func(x), d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, diagonalize=diagonalize)
+    solver = general_solver(H_s_func(x), d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, diagonalize=diagonalize, include_digamma=include_digamma)
     rho_ss, L = solver.find_steady_state()
     V, V_dag = solver.V, solver.V_dag
     if use_pinv:
@@ -590,6 +602,7 @@ def calc_langevin_quantities(H_s_func, ddx_H_s_func, x, d_ops, a_ops, Gammas, mu
     
     N = 2
     dx = 1e-4
+    integral_lim = numpy.inf
     
     for nu in range(xs):
         ddx_H_s_nu = V_dag @ ddx_H_s_func(nu, x) @ V
@@ -603,7 +616,7 @@ def calc_langevin_quantities(H_s_func, ddx_H_s_func, x, d_ops, a_ops, Gammas, mu
         for i in (list(range(-N, 0)) + list(range(1, N+1))):
             H_temp = H_s_func(x + i*vec_dx)
             #solver = create_single_level_solver(H_temp[1,1]-H_temp[0,0], Gammas[0][0], mu_L, mu_R, T_L, T_R)
-            solver2 = general_solver(H_temp, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, diagonalize=diagonalize)
+            solver2 = general_solver(H_temp, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, diagonalize=diagonalize, include_digamma=include_digamma)
             #print(solver.H_S)
             rho, L2 = solver2.find_steady_state()
             V2, V2_dag = solver2.V, solver2.V_dag
@@ -626,7 +639,7 @@ def calc_langevin_quantities(H_s_func, ddx_H_s_func, x, d_ops, a_ops, Gammas, mu
                 friction[alpha, nu] = numpy.trace(ddx_H_s_alpha @ ((L_inv @ ddx_rho.flatten(order='F')).reshape(ddx_rho.shape, order='F')))
                 correlation[alpha, nu] = -0.5 * numpy.trace(ddx_H_s_alpha @ ((L_inv @ (numpy.kron(numpy.identity(rho_ss.shape[0]), ddx_H_s_nu) + numpy.kron(numpy.transpose(ddx_H_s_nu), numpy.identity(rho_ss.shape[0])) + 2 * mean_force[nu] * numpy.identity(L.shape[0])) @ rho_ss.flatten(order='F')).reshape(rho_ss.shape, order='F')))
             else:
-                friction[alpha, nu] = integrate.quad(lambda lamda: numpy.trace(ddx_H_s_alpha @ ((-linalg.expm(L * lamda) @ ddx_rho.flatten(order='F')).reshape(ddx_rho.shape, order='F')), dtype=numpy.float64), 0, 1e3)[0]
-                correlation[alpha, nu] = -0.5 * integrate.quad(lambda lamda: numpy.trace(ddx_H_s_alpha @ ((-linalg.expm(L * lamda) @ (numpy.kron(numpy.identity(rho_ss.shape[0]), ddx_H_s_nu) + numpy.kron(numpy.transpose(ddx_H_s_nu), numpy.identity(rho_ss.shape[0])) + 2 * mean_force[nu] * numpy.identity(L.shape[0])) @ rho_ss.flatten(order='F')).reshape(rho_ss.shape, order='F')), dtype=numpy.float64), 0, 1e3)[0]
+                friction[alpha, nu] = integrate.quad(lambda lamda: numpy.trace(ddx_H_s_alpha @ ((-linalg.expm(L * lamda) @ ddx_rho.flatten(order='F')).reshape(ddx_rho.shape, order='F')), dtype=numpy.float64), 0, integral_lim)[0]
+                correlation[alpha, nu] = -0.5 * integrate.quad(lambda lamda: numpy.trace(ddx_H_s_alpha @ ((-linalg.expm(L * lamda) @ (numpy.kron(numpy.identity(rho_ss.shape[0]), ddx_H_s_nu) + numpy.kron(numpy.transpose(ddx_H_s_nu), numpy.identity(rho_ss.shape[0])) + 2 * mean_force[nu] * numpy.identity(L.shape[0])) @ rho_ss.flatten(order='F')).reshape(rho_ss.shape, order='F')), dtype=numpy.float64), 0, integral_lim)[0]
             
     return mean_force, friction, correlation
