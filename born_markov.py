@@ -3,13 +3,13 @@ from scipy import linalg, special, integrate
 from scipy.integrate import solve_ivp
 import types
 
-hbar = 0.65821195695091   # reduced Planck constant in units eV*fs
-_hbar = 1 / hbar          # inverse reduced Planck constant in units 1/(eV*fs)
-k_B = 8.6173332621452e-5  # Boltzmann constant in units eV/K
+#hbar = 0.65821195695091   # reduced Planck constant in units eV*fs
+#_hbar = 1 / hbar          # inverse reduced Planck constant in units 1/(eV*fs)
+#k_B = 8.6173332621452e-5  # Boltzmann constant in units eV/K
 
-#hbar = 1
-#_hbar = 1
-#k_B = 1
+hbar = 1
+_hbar = 1
+k_B = 1
     
 
 def Hc(A):
@@ -239,6 +239,9 @@ class BornMarkovSolver:
     
 	
 def general_solver(H_s_tot, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, diagonalize=numpy.linalg.eig, include_digamma=True):
+    if len(Gammas.shape) == 2:
+        Gammas = numpy.transpose(numpy.array([Gammas, Gammas]), axes=(1,2,0))
+
     def f_L(E):
         return 1 / (numpy.exp((E - mu_L)/(k_B * T_L)) + 1)
     
@@ -299,34 +302,24 @@ def general_solver(H_s_tot, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, diagonal
         D2_L.append([])
         D2_R.append([])
         for j in range(n):
-            if Gammas[i][j] != 0:
-                
-                # create D1_ij
-                D1[i].append(0.5 * Gammas[i][j] * (gL + gR) * d_dag_T[j])
-                
-                # create D1_L_ij
-                D1_L[i].append(0.5 * Gammas[i][j] * gL * d_dag_T[j])
-                
-                # create D1_R_ij
-                D1_R[i].append(0.5 * Gammas[i][j] * gR * d_dag_T[j])
-                
-                # create D2_ij
-                D2[i].append(0.5 * Gammas[i][j] * (2 - gL - gR) * d_dag_T[j])
-                
-                # create D2_L_ij
-                D2_L[i].append(0.5 * Gammas[i][j] * (1 - gL) * d_dag_T[j])
-                
-                # create D2_R_ij
-                D2_R[i].append(0.5 * Gammas[i][j] * (1 - gR) * d_dag_T[j])
             
-            else:
-                zero_op = numpy.zeros((N,N))
-                D1[i].append(zero_op)
-                D1_L[i].append(zero_op)
-                D1_R[i].append(zero_op)
-                D2[i].append(zero_op)
-                D2_L[i].append(zero_op)
-                D2_R[i].append(zero_op)
+            # create D1_L_ij
+            D1_L[i].append(0.5 * Gammas[i,j,0] * gL * d_dag_T[j])
+            
+            # create D1_R_ij
+            D1_R[i].append(0.5 * Gammas[i,j,1] * gR * d_dag_T[j])
+            
+            # create D1_ij
+            D1[i].append(D1_L[i][j] + D1_R[i][j])
+            
+            # create D2_L_ij
+            D2_L[i].append(0.5 * Gammas[i,j,0] * (1 - gL) * d_dag_T[j])
+            
+            # create D2_R_ij
+            D2_R[i].append(0.5 * Gammas[i,j,1] * (1 - gR) * d_dag_T[j])
+            
+            # create D2_ij
+            D2[i].append(D2_L[i][j] + D2_R[i][j])
     
     solver = BornMarkovSolver(W, d_ops_T, D1, D2, D1_L, D2_L, D1_R, D2_R)
     solver.V = V
@@ -351,7 +344,7 @@ def create_holstein_solver_via_diagonalization(e_0, omega, lamda, N, Gamma, mu_L
     
     #print(H_s)
     
-    return general_solver(H_s, [d_op], [a_op], [[Gamma]], mu_L, mu_R, T_L, T_R)
+    return general_solver(H_s, [d_op], [a_op], numpy.array([[Gamma]]), mu_L, mu_R, T_L, T_R)
     
     
     
