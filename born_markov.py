@@ -1,4 +1,5 @@
 import numpy
+import scipy
 from scipy import linalg, special, integrate
 from scipy.integrate import solve_ivp
 import types
@@ -580,7 +581,7 @@ def create_anderson_hopping_solver(e_1, e_2, U, t, Gamma, mu_L, mu_R, T_L, T_R):
     return general_solver(H_S, [d_1, d_2], [], Gamma * numpy.ones((2,2)), mu_L, mu_R, T_L, T_R)
    
   
-def calc_langevin_quantities(H_s_func, ddx_H_s_func, x, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, use_pinv=False, diagonalize=numpy.linalg.eig, include_digamma=True):
+def calc_langevin_quantities(H_s_func, ddx_H_s_func, x, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, method="analytic", diagonalize=numpy.linalg.eig, include_digamma=True):
     xs = len(x)
     
     mean_force = numpy.zeros(xs, dtype=numpy.complex128)
@@ -590,12 +591,23 @@ def calc_langevin_quantities(H_s_func, ddx_H_s_func, x, d_ops, a_ops, Gammas, mu
     solver = general_solver(H_s_func(x), d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, diagonalize=diagonalize, include_digamma=include_digamma)
     rho_ss, L = solver.find_steady_state()
     V, V_dag = solver.V, solver.V_dag
-    if use_pinv:
+    
+    if method == "pinv":
         L_inv = linalg.pinv(L)
+        
+    elif method == "analytic":
+        Lw, LV = diagonalize(L)
+        LV_inv = scipy.linalg.inv(LV)
+        expLw = numpy.diag(numpy.where(Lw.real < -100 * numpy.finfo(numpy.complex128).eps, -1 / Lw, 0))
+        Lg =  -LV @ expLw @ LV_inv
+                
+    elif method == "numerical":
+        Lw, LV = diagonalize(L)
+        LV_inv = scipy.linalg.inv(LV)
+        integral_lim = numpy.inf
     
     N = 2
     dx = 1e-4
-    integral_lim = numpy.inf
     
     for nu in range(xs):
         ddx_H_s_nu = V_dag @ ddx_H_s_func(nu, x) @ V
@@ -628,10 +640,15 @@ def calc_langevin_quantities(H_s_func, ddx_H_s_func, x, d_ops, a_ops, Gammas, mu
             
             ddx_H_s_alpha = V_dag @ ddx_H_s_func(alpha, x) @ V
             
-            if use_pinv:
+            if method == "pinv":
                 friction[alpha, nu] = numpy.trace(ddx_H_s_alpha @ ((L_inv @ ddx_rho.flatten(order='F')).reshape(ddx_rho.shape, order='F')))
                 correlation[alpha, nu] = -0.5 * numpy.trace(ddx_H_s_alpha @ ((L_inv @ (numpy.kron(numpy.identity(rho_ss.shape[0]), ddx_H_s_nu) + numpy.kron(numpy.transpose(ddx_H_s_nu), numpy.identity(rho_ss.shape[0])) + 2 * mean_force[nu] * numpy.identity(L.shape[0])) @ rho_ss.flatten(order='F')).reshape(rho_ss.shape, order='F')))
-            else:
+                
+            elif method == "analytic":
+                friction[alpha, nu] = numpy.trace(ddx_H_s_alpha @ ((Lg @ ddx_rho.flatten(order='F')).reshape(ddx_rho.shape, order='F')), dtype=numpy.complex128)
+                correlation[alpha, nu] = -0.5 * numpy.trace(ddx_H_s_alpha @ ((Lg @ (numpy.kron(numpy.identity(rho_ss.shape[0]), ddx_H_s_nu) + numpy.kron(numpy.transpose(ddx_H_s_nu), numpy.identity(rho_ss.shape[0])) + 2 * mean_force[nu] * numpy.identity(L.shape[0])) @ rho_ss.flatten(order='F')).reshape(rho_ss.shape, order='F')), dtype=numpy.complex128)
+            
+            elif method == "numerical":
                 friction[alpha, nu] = integrate.quad(lambda lamda: numpy.trace(ddx_H_s_alpha @ ((-linalg.expm(L * lamda) @ ddx_rho.flatten(order='F')).reshape(ddx_rho.shape, order='F')), dtype=numpy.float64), 0, integral_lim)[0]
                 correlation[alpha, nu] = -0.5 * integrate.quad(lambda lamda: numpy.trace(ddx_H_s_alpha @ ((-linalg.expm(L * lamda) @ (numpy.kron(numpy.identity(rho_ss.shape[0]), ddx_H_s_nu) + numpy.kron(numpy.transpose(ddx_H_s_nu), numpy.identity(rho_ss.shape[0])) + 2 * mean_force[nu] * numpy.identity(L.shape[0])) @ rho_ss.flatten(order='F')).reshape(rho_ss.shape, order='F')), dtype=numpy.float64), 0, integral_lim)[0]
             
