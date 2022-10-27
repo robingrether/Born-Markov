@@ -103,7 +103,29 @@ def generate_ferm_bos_ops(Nf, Nb, Mb):
         a_dags[i] = numpy.kron(numpy.identity(nf), a_dags[i])
         
     return (d_ops, d_dags), (a_ops, a_dags)
-    
+
+
+# arr: square matrix/array to take partial trace of
+# n: dimension of subspace that is to be traced over
+# first: is the subspace to be traced over the first or second argument of the kronecker multiplication?
+#
+# calculates the partial trace of a square matrix; returned array has shape arr.shape // n
+def partial_trace(arr, n, first=True):
+    if first:
+        m = arr.shape[0] // n
+        pt = numpy.zeros((m,m), dtype=arr.dtype)
+        for i in range(m):
+            for j in range(m):
+                pt[i,j] = numpy.sum(arr[i::m,j::m])
+        return pt
+    else:
+        m = arr.shape[0] // n
+        pt = numpy.zeros((m,m), dtype=arr.dtype)
+        for i in range(n):
+            for j in range(n):
+                pt += arr[i::n,j::n]
+        return pt
+
 
 class BornMarkovSolver:
     
@@ -328,7 +350,7 @@ def general_solver(H_s_tot, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, diagonal
     return solver
             
 
-def create_holstein_solver_via_diagonalization(e_0, omega, lamda, N, Gamma, mu_L, mu_R, T_L, T_R):
+def create_holstein_solver_via_diagonalization(e_0, omega, lamda, N, Gamma, mu_L, mu_R, T_L, T_R, include_digamma=False):
     d_op = numpy.array([[0, 1], [0, 0]])
     d_dag = numpy.transpose(d_op)
     d_op = numpy.kron(d_op, numpy.identity(N))
@@ -345,7 +367,7 @@ def create_holstein_solver_via_diagonalization(e_0, omega, lamda, N, Gamma, mu_L
     
     #print(H_s)
     
-    return general_solver(H_s, [d_op], [a_op], numpy.array([[Gamma]]), mu_L, mu_R, T_L, T_R)
+    return general_solver(H_s, [d_op], [a_op], numpy.array([[Gamma]]), mu_L, mu_R, T_L, T_R, include_digamma=include_digamma)
     
     
     
@@ -455,7 +477,7 @@ def create_anderson_solver(e_up, e_down, U, Gamma, mu_L, mu_R, T_L, T_R):
                            gamma_d_dags2, gamma_d_dags1L, gamma_d_dags2L,
                            gamma_d_dags1R, gamma_d_dags2R)
 
-def create_holstein_solver(e_0, omega, lamda, N, Gamma, mu_L, mu_R, T_L, T_R, use_exp=False):
+def create_holstein_solver(e_0, omega, lamda, N, Gamma, mu_L, mu_R, T_L, T_R, use_exp=False, include_digamma=False):
     def f_L(n, m):
         return 1 / (numpy.exp((e_0 - lamda**2/omega + (n-m)*omega - mu_L)/(k_B * T_L)) + 1)
     
@@ -463,10 +485,16 @@ def create_holstein_solver(e_0, omega, lamda, N, Gamma, mu_L, mu_R, T_L, T_R, us
         return 1 / (numpy.exp((e_0 - lamda**2/omega + (n-m)*omega - mu_R)/(k_B * T_R)) + 1)
     
     def psi_L(n, m):
-        return special.digamma(0.5 + 1j * (e_0 - lamda**2/omega + (n-m)*omega - mu_L)/(2 * numpy.pi * k_B * T_L)).real / numpy.pi
+        if include_digamma:
+            return special.digamma(0.5 + 1j * (e_0 - lamda**2/omega + (n-m)*omega - mu_L)/(2 * numpy.pi * k_B * T_L)).real / numpy.pi
+        else:
+            return 0
     
     def psi_R(n, m):
-        return special.digamma(0.5 + 1j * (e_0 - lamda**2/omega + (n-m)*omega - mu_R)/(2 * numpy.pi * k_B * T_R)).real / numpy.pi
+        if include_digamma:
+            return special.digamma(0.5 + 1j * (e_0 - lamda**2/omega + (n-m)*omega - mu_R)/(2 * numpy.pi * k_B * T_R)).real / numpy.pi
+        else:
+            return 0
         
     def fc_plus(n, m):
         mu = lamda / omega
