@@ -1,8 +1,9 @@
 import numpy
 import scipy
-from scipy import linalg, special, integrate
+from scipy import linalg, special, integrate, sparse
 from scipy.integrate import solve_ivp
 import types
+import gc
 
 #hbar = 0.65821195695091   # reduced Planck constant in units eV*fs
 #_hbar = 1 / hbar          # inverse reduced Planck constant in units 1/(eV*fs)
@@ -162,8 +163,8 @@ class BornMarkovSolver:
                 G = numpy.kron(numpy.transpose(Hc(self.d_ops[i])), Hc(self.D2[i][j]))
                 H = numpy.kron(numpy.transpose(Hc(self.D1[i][j]) @ Hc(self.d_ops[i])), unity)
                 part1 += A - B - C + D + E - F - G + H
-                #print(D)    
-        self.Liouvillian = -1j * _hbar * part0 - _hbar * part1
+        self.part1 = part1
+        self.sparse_L = sparse.csr_matrix(-1j * _hbar * part0 - _hbar * part1, dtype=numpy.complex128)
         
     def get_ddt_rho(self, rho):
         part0 = self.H_S @ rho - rho @ self.H_S
@@ -216,27 +217,195 @@ class BornMarkovSolver:
         stuff = solve_ivp(lambda t, rho: self.get_ddt_rho(rho.reshape(shape)).flatten(), (0, t), rho.flatten(), method="RK45", t_eval=(0, t), max_step=dt_max)
         return stuff.y[:,-1].reshape(shape)
     
-    def find_steady_state(self):
-        L = self.Liouvillian
+    def find_steady_state(self, ignore_coherences=False, additional_coherences=numpy.array([]), use_sparse=False):
+        # TODO: implement sparse approach
         
-        null_space = linalg.null_space(L)
+        n = self.H_S.shape[0]
         
-        #u, s, vh = numpy.linalg.svd(L, full_matrices=True)
-        #M, N = u.shape[0], vh.shape[1]
-        #rcond = numpy.finfo(s.dtype).eps * max(M, N)
-        #tol = numpy.amax(s) * rcond
-        #num = numpy.sum(s > tol, dtype=int)
-        #null_space = vh[num:,:].T.conj()
+        if ignore_coherences:
+            
+            selection = list(numpy.arange(0, n**2, n+1))
+            for (row, col) in additional_coherences:
+                selection.append(row + n*col)
+            selection = numpy.array(selection, dtype=numpy.int32)
+            
+            L = (self.sparse_L[selection][:,selection]).toarray(order='C')
+            
+            L[0][:n] += 1.
         
-        if null_space.shape[-1] != 1:
-            print("ALARM!!! ", null_space.shape[-1], "/", L.shape[-1], sep="")
-            raise ValueError
+        else:
         
-        rho_ss = numpy.reshape(null_space[:,0], self.H_S.shape, order='F')
-        rho_ss /= numpy.sum(numpy.diag(rho_ss))
-        return rho_ss, numpy.copy(L)
-
+            L = self.sparse_L.toarray(order='C')
+            
+            #trace_selection = list(numpy.arange(0, n**2, n+1))
+            L[0][0:n**2:n+1] += 1.
+        
+        b = numpy.zeros(L.shape[-1], dtype=numpy.complex128)
+        b[0] = 1.
+        
+        r = linalg.solve(L, b)
+        
+        del L, b
+        gc.collect()
+        
+        if ignore_coherences:
+        
+            rho_ss = numpy.diag(r[:n])
+            for i, (row, col) in enumerate(additional_coherences):
+                rho_ss[row, col] = r[n+i]
+            
+            #print(numpy.trace(rho_ss))
+            return rho_ss
+        
+        else:
+            
+            rho_ss = numpy.reshape(r, (n, n), order='F')
+            
+            #print(numpy.trace(rho_ss))
+            return rho_ss
     
+    def find_steady_state_old(self, ignore_coherences=False, additional_coherences=numpy.array([]), use_sparse=True):
+        
+        if use_sparse:
+        
+            if ignore_coherences:
+            
+                n = self.H_S.shape[0]
+                
+                selection = list(numpy.arange(0, self.sparse_L.shape[-1], n+1))
+                for (row, col) in additional_coherences:
+                    selection.append(row + n*col)
+                selection = numpy.array(selection, dtype=numpy.int32)
+                
+                L_pure = self.sparse_L[selection][:,selection]
+                
+                u, s, vh = linalg.svd(L_pure.toarray(order='C'), full_matrices=True, overwrite_a=True)
+                M, N = u.shape[0], vh.shape[1]
+                rcond = numpy.finfo(s.dtype).eps * max(M, N)
+                tol = numpy.amax(s) * rcond
+                num = numpy.sum(s > tol, dtype=int)
+                null_space = vh[num:,:].T.conj()
+                del u, s, vh
+                gc.collect()
+                
+                if null_space.shape[-1] != 1:
+                    print("ALARM!!! ", null_space.shape[-1])
+                    raise ValueError
+                
+                print(null_space)
+                
+                rho_ss = numpy.diag(null_space[:n,0])
+                for i, (row, col) in enumerate(additional_coherences):
+                    rho_ss[row, col] = null_space[n+i,0]
+                
+                rho_ss /= numpy.sum(numpy.diag(rho_ss))
+                
+                print(rho_ss.shape)
+                
+                return rho_ss
+                
+            else:
+                
+                u, s, vh = linalg.svd(self.sparse_L.toarray(order='C'), full_matrices=True, overwrite_a=True)
+                M, N = u.shape[0], vh.shape[1]
+                rcond = numpy.finfo(s.dtype).eps * max(M, N)
+                tol = numpy.amax(s) * rcond
+                num = numpy.sum(s > tol, dtype=int)
+                null_space = vh[num:,:].T.conj()
+                del u, s, vh
+                gc.collect()
+                
+                if null_space.shape[-1] != 1:
+                    print("ALARM!!! ", null_space.shape[-1])
+                    raise ValueError
+                
+                print(null_space)
+                
+                rho_ss = numpy.reshape(null_space[:,0], self.H_S.shape, order='F')
+                tracey = numpy.sum(numpy.diag(rho_ss))
+                print(tracey)
+                rho_ss /= tracey
+                return rho_ss
+            
+        else:
+        
+            L = self.sparse_L.toarray(order='C')
+            
+    #        if ignore_coherences:
+    #        
+    #            n = self.H_S.shape[0]
+    #            L_pure = L[numpy.arange(0, L.shape[-1], n+1)][:,numpy.arange(0, L.shape[-1], n+1)]
+    #            
+    #            print(L_pure.shape)
+    #            
+    #            null_space = linalg.null_space(L_pure)
+    #            
+    #            print(null_space.shape)
+    #            
+    #            if null_space.shape[-1] != 1:
+    #                print("ALARM!!! ", null_space.shape[-1], "/", L_pure.shape[-1], sep="")
+    #                raise ValueError
+    #            
+    #            rho_ss = numpy.diag(null_space[:,0])
+    #            rho_ss /= numpy.sum(numpy.diag(rho_ss))
+    #            
+    #            print(rho_ss.shape)
+    #            
+    #            return rho_ss, numpy.copy(L)
+                
+            if ignore_coherences:
+            
+                n = self.H_S.shape[0]
+                
+                selection = list(numpy.arange(0, L.shape[-1], n+1))
+                for (row, col) in additional_coherences:
+                    selection.append(row + n*col)
+                selection = numpy.array(selection, dtype=numpy.int32)
+                
+                L_pure = L[selection][:,selection]
+                
+                print(L_pure.shape)
+                
+                null_space = linalg.null_space(L_pure)
+                
+                print(null_space.shape)
+                
+                if null_space.shape[-1] != 1:
+                    print("ALARM!!! ", null_space.shape[-1], "/", L_pure.shape[-1], sep="")
+                    raise ValueError
+                
+                rho_ss = numpy.diag(null_space[:n,0])
+                for i, (row, col) in enumerate(additional_coherences):
+                    rho_ss[row, col] = null_space[n+i,0]
+                
+                rho_ss /= numpy.sum(numpy.diag(rho_ss))
+                
+                print(rho_ss.shape)
+                
+                return rho_ss
+                
+            else:
+            
+                null_space = linalg.null_space(L)
+                
+                #u, s, vh = numpy.linalg.svd(L, full_matrices=True)
+                #M, N = u.shape[0], vh.shape[1]
+                #rcond = numpy.finfo(s.dtype).eps * max(M, N)
+                #tol = numpy.amax(s) * rcond
+                #num = numpy.sum(s > tol, dtype=int)
+                #null_space = vh[num:,:].T.conj()
+                
+                if null_space.shape[-1] != 1:
+                    print("ALARM!!! ", null_space.shape[-1], "/", L.shape[-1], sep="")
+                    raise ValueError
+                
+                rho_ss = numpy.reshape(null_space[:,0], self.H_S.shape, order='F')
+                tracey = numpy.sum(numpy.diag(rho_ss))
+                print(tracey)
+                rho_ss /= tracey
+                return rho_ss
+
+
 
     def calc_rho(self, rho_0, t, dt=1e-3):
         N = int(t/dt)
@@ -259,12 +428,13 @@ class BornMarkovSolver:
         self.propagate(rho_0, t, consumer=consume, dt=dt)
         
         return current
-    
-	
+
+
+
 def general_solver(H_s_tot, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, diagonalize=numpy.linalg.eig, include_digamma=True):
     if len(Gammas.shape) == 2:
         Gammas = numpy.transpose(numpy.array([Gammas, Gammas]), axes=(1,2,0))
-
+    
     def f_L(E):
         return 1 / (numpy.exp((E - mu_L)/(k_B * T_L)) + 1)
     
@@ -289,13 +459,7 @@ def general_solver(H_s_tot, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, diagonal
     Nb = N - Nf
     
     # create and diagonalize total system Hamiltonian
-    #is_diag = (H_s_tot == 0)
-    #numpy.fill_diagonal(is_diag, True)
-    #if is_diag.all():
-    #    w = numpy.diag(H_s_tot)
-    #    V = V_dag = numpy.identity(N)
-    #    W = H_s_tot
-    #else:
+    # H_s =: V @ W @ V_dag
     w, V = diagonalize(H_s_tot)
     W = numpy.diag(w)
     V_dag = Hc(V)
@@ -609,7 +773,7 @@ def create_anderson_hopping_solver(e_1, e_2, U, t, Gamma, mu_L, mu_R, T_L, T_R):
     return general_solver(H_S, [d_1, d_2], [], Gamma * numpy.ones((2,2)), mu_L, mu_R, T_L, T_R)
    
   
-def calc_langevin_quantities(H_s_func, ddx_H_s_func, x, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, method="analytic", diagonalize=numpy.linalg.eig, include_digamma=True):
+def calc_langevin_quantities(H_s_func, ddx_H_s_func, x, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, method="analytic", diagonalize=numpy.linalg.eig, include_digamma=True, ignore_coherences=False, additional_coherences=numpy.array([]), use_sparse=True):
     xs = len(x)
     
     mean_force = numpy.zeros(xs, dtype=numpy.complex128)
@@ -617,22 +781,40 @@ def calc_langevin_quantities(H_s_func, ddx_H_s_func, x, d_ops, a_ops, Gammas, mu
     correlation = numpy.zeros((xs, xs), dtype=numpy.complex128)
     
     solver = general_solver(H_s_func(x), d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, diagonalize=diagonalize, include_digamma=include_digamma)
-    rho_ss, L = solver.find_steady_state()
+    rho_ss = solver.find_steady_state(ignore_coherences=ignore_coherences, additional_coherences=additional_coherences, use_sparse=use_sparse)
     V, V_dag = solver.V, solver.V_dag
     
     if method == "pinv":
-        L_inv = linalg.pinv(L)
+        L = solver.sparse_L.toarray(order='C')
+        L_inv = linalg.pinv2(L)
+        n2 = L.shape[0]
+        del L
+        gc.collect()
         
     elif method == "analytic":
+        L = solver.sparse_L.toarray(order='C')
         Lw, LV = diagonalize(L)
         LV_inv = scipy.linalg.inv(LV)
-        expLw = numpy.diag(numpy.where(Lw.real < -100 * numpy.finfo(numpy.complex128).eps, -1 / Lw, 0))
-        Lg =  -LV @ expLw @ LV_inv
-                
+        index = numpy.argmin(numpy.abs(Lw))
+        Lw_inv = -1 / Lw
+        Lw_inv[index] = 0.
+        expLw = numpy.diag(Lw_inv)
+        Lg = -LV @ expLw @ LV_inv
+        n2 = L.shape[0]
+        del L
+        gc.collect()
+        #with numpy.printoptions(threshold=numpy.inf):
+        #    print(numpy.sort(numpy.copy(Lw)))
+        
     elif method == "numerical":
+        L = solver.sparse_L.toarray(order='C')
         Lw, LV = diagonalize(L)
         LV_inv = scipy.linalg.inv(LV)
         integral_lim = numpy.inf
+    
+    elif method == "solve":
+        L = solver.sparse_L.toarray(order='C')
+        n2 = L.shape[0]
     
     N = 2
     dx = 1e-4
@@ -651,9 +833,11 @@ def calc_langevin_quantities(H_s_func, ddx_H_s_func, x, d_ops, a_ops, Gammas, mu
             #solver = create_single_level_solver(H_temp[1,1]-H_temp[0,0], Gammas[0][0], mu_L, mu_R, T_L, T_R)
             solver2 = general_solver(H_temp, d_ops, a_ops, Gammas, mu_L, mu_R, T_L, T_R, diagonalize=diagonalize, include_digamma=include_digamma)
             #print(solver.H_S)
-            rho, L2 = solver2.find_steady_state()
+            rho = solver2.find_steady_state(ignore_coherences=ignore_coherences, additional_coherences=additional_coherences, use_sparse=use_sparse)
             V2, V2_dag = solver2.V, solver2.V_dag
             rhos.append(V2 @ rho @ V2_dag)
+            del solver2, rho, V2, V2_dag
+            gc.collect()
         if N == 2:
             coeff = [1/12, -2/3, 2/3, -1/12]
         elif N == 1:
@@ -670,14 +854,25 @@ def calc_langevin_quantities(H_s_func, ddx_H_s_func, x, d_ops, a_ops, Gammas, mu
             
             if method == "pinv":
                 friction[alpha, nu] = numpy.trace(ddx_H_s_alpha @ ((L_inv @ ddx_rho.flatten(order='F')).reshape(ddx_rho.shape, order='F')))
-                correlation[alpha, nu] = -0.5 * numpy.trace(ddx_H_s_alpha @ ((L_inv @ (numpy.kron(numpy.identity(rho_ss.shape[0]), ddx_H_s_nu) + numpy.kron(numpy.transpose(ddx_H_s_nu), numpy.identity(rho_ss.shape[0])) + 2 * mean_force[nu] * numpy.identity(L.shape[0])) @ rho_ss.flatten(order='F')).reshape(rho_ss.shape, order='F')))
+                correlation[alpha, nu] = -0.5 * numpy.trace(ddx_H_s_alpha @ ((L_inv @ (numpy.kron(numpy.identity(rho_ss.shape[0]), ddx_H_s_nu) + numpy.kron(numpy.transpose(ddx_H_s_nu), numpy.identity(rho_ss.shape[0])) + 2 * mean_force[nu] * numpy.identity(n2)) @ rho_ss.flatten(order='F')).reshape(rho_ss.shape, order='F')))
                 
             elif method == "analytic":
                 friction[alpha, nu] = numpy.trace(ddx_H_s_alpha @ ((Lg @ ddx_rho.flatten(order='F')).reshape(ddx_rho.shape, order='F')), dtype=numpy.complex128)
-                correlation[alpha, nu] = -0.5 * numpy.trace(ddx_H_s_alpha @ ((Lg @ (numpy.kron(numpy.identity(rho_ss.shape[0]), ddx_H_s_nu) + numpy.kron(numpy.transpose(ddx_H_s_nu), numpy.identity(rho_ss.shape[0])) + 2 * mean_force[nu] * numpy.identity(L.shape[0])) @ rho_ss.flatten(order='F')).reshape(rho_ss.shape, order='F')), dtype=numpy.complex128)
+                correlation[alpha, nu] = -0.5 * numpy.trace(ddx_H_s_alpha @ ((Lg @ (numpy.kron(numpy.identity(rho_ss.shape[0]), ddx_H_s_nu) + numpy.kron(numpy.transpose(ddx_H_s_nu), numpy.identity(rho_ss.shape[0])) + 2 * mean_force[nu] * numpy.identity(n2)) @ rho_ss.flatten(order='F')).reshape(rho_ss.shape, order='F')), dtype=numpy.complex128)
             
             elif method == "numerical":
                 friction[alpha, nu] = integrate.quad(lambda lamda: numpy.trace(ddx_H_s_alpha @ ((-linalg.expm(L * lamda) @ ddx_rho.flatten(order='F')).reshape(ddx_rho.shape, order='F')), dtype=numpy.float64), 0, integral_lim)[0]
                 correlation[alpha, nu] = -0.5 * integrate.quad(lambda lamda: numpy.trace(ddx_H_s_alpha @ ((-linalg.expm(L * lamda) @ (numpy.kron(numpy.identity(rho_ss.shape[0]), ddx_H_s_nu) + numpy.kron(numpy.transpose(ddx_H_s_nu), numpy.identity(rho_ss.shape[0])) + 2 * mean_force[nu] * numpy.identity(L.shape[0])) @ rho_ss.flatten(order='F')).reshape(rho_ss.shape, order='F')), dtype=numpy.float64), 0, integral_lim)[0]
             
+            elif method == "solve":
+                elem1 = ddx_rho.flatten(order='F')
+                elem2 = (numpy.kron(numpy.identity(rho_ss.shape[0]), ddx_H_s_nu) + numpy.kron(numpy.transpose(ddx_H_s_nu), numpy.identity(rho_ss.shape[0])) + 2 * mean_force[nu] * numpy.identity(n2)) @ rho_ss.flatten(order='F')
+                
+                inv1 = linalg.lstsq(L, elem1)[0]
+                inv2 = linalg.lstsq(L, elem2)[0]
+            
+                friction[alpha, nu] = numpy.trace(ddx_H_s_alpha @ (inv1.reshape(ddx_rho.shape, order='F')), dtype=numpy.complex128)
+                correlation[alpha, nu] = -0.5 * numpy.trace(ddx_H_s_alpha @ (inv2.reshape(rho_ss.shape, order='F')), dtype=numpy.complex128)
+            
     return mean_force, friction, correlation
+
