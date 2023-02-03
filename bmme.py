@@ -134,8 +134,9 @@ def create_sparse_matrix(arg1, dtype=numpy.complex128):
 
 
 class BornMarkovSolver:
-
-    def __init__(self, H_S, d_ops, a_ops, Gammas, chemical_potentials, temperatures, diagonalize=numpy.linalg.eig, include_digamma=True):
+    
+    # chop only works when diagonalize returns the eigenvalues sorted in ascending order!
+    def __init__(self, H_S, d_ops, a_ops, Gammas, chemical_potentials, temperatures, diagonalize=numpy.linalg.eigh, include_digamma=True, chop=-1):
         number_of_leads = len(chemical_potentials)
         
         if len(Gammas.shape) == 2:
@@ -150,55 +151,47 @@ class BornMarkovSolver:
         
         # diagonalize system Hamiltonian
         w, V = diagonalize(H_S)
-        # sort values for chopping
-        # TODO
+        # chop diagonal values if wanted
+        if chop > 0:
+            w = w[:chop]
+            dimension = chop
+            dimension_of_bosons = dimension - dimension_of_fermions
         W = numpy.diag(w)
         V_dag = Hc(V)
-          
         
         #time2 = time.time()
         
         # create frequencies and subspace projected operators
-        frequencies = numpy.tile(w,(dimension,1)).T - numpy.tile(w,(dimension,1))
         frequency = []
         d_op_omega = [[] for i in range(number_of_fermions)]
-        #d_dag_omega = [[] for i in range(number_of_fermions)]
-        
         first = True
         for n in range(dimension):
             for m in range(dimension):
-                freq = frequencies[n,m]
+                freq = w[m] - w[n]
                 
                 if not first:
                     diff = numpy.abs(numpy.array(frequency) - freq)
-                    minarg = numpy.argmin(diff)
+                    minimum = numpy.argmin(diff)
                 
-                projector_n = numpy.outer(V[:,n], Hc(V[:,n]))
-                projector_m = numpy.outer(V[:,m], Hc(V[:,m]))
-                
-                if (not first) and (diff[minarg] < 1e-6):
+                if (not first) and (diff[minimum] < 1e-6):
                     for i in range(number_of_fermions):
-                        d_op_omega[i][minarg] += create_sparse_matrix(projector_n @ V_dag @ d_ops[i] @ V @ projector_m)
-                        #d_dag_omega[i][minarg] += projector_m @ V_dag @ Hc(d_ops[i]) @ V @ projector_n
-                    
+                        d_op_omega[i][minimum][n,m] += (V_dag @ d_ops[i] @ V)[n,m]
+                
                 else:
-                    local_d_op_omega = []
+                    arr_d_op_omega = []
                     any_nonzero = False
                     for i in range(number_of_fermions):
-                        current_d_op_omega = create_sparse_matrix(projector_n @ V_dag @ d_ops[i] @ V @ projector_m)
-                        if current_d_op_omega.count_nonzero():
+                        local_d_op_omega = create_sparse_matrix(numpy.zeros((dimension, dimension)))
+                        local_d_op_omega[n,m] = (V_dag @ d_ops[i] @ V)[n,m]
+                        if local_d_op_omega.count_nonzero():
                             any_nonzero = True
-                        local_d_op_omega.append(current_d_op_omega)
-                        
+                        arr_d_op_omega.append(local_d_op_omega)
+                    
                     if any_nonzero:
                         frequency.append(freq)
                         first = False
-                        
                         for i in range(number_of_fermions):
-                            d_op_omega[i].append(local_d_op_omega[i])
-                            #d_dag_omega[i].append(projector_m @ V_dag @ Hc(d_ops[i]) @ V @ projector_n)
-                
-        # somehow merge subspaces together -> create projected d_ops/d_dags
+                            d_op_omega[i].append(arr_d_op_omega[i])
         
         #time3 = time.time()
         
@@ -206,12 +199,12 @@ class BornMarkovSolver:
         self.number_of_leads = number_of_leads
         self.number_of_fermions = number_of_fermions
         self.dimension = dimension
+        self.chop = chop
         self.V = V
         self.V_dag = V_dag
         self.H_S = create_sparse_matrix(W)
         self.frequency = frequency
         self.d_op_omega = d_op_omega
-        #self.d_dag_omega = d_dag_omega
         self.chemical_potential = chemical_potentials
         self.temperature = temperatures
         self.include_digamma = include_digamma
@@ -354,8 +347,16 @@ class BornMarkovSolver:
             currents[lead] = self.get_current(rho, lead)
         return currents
         
+    def retransform_rho(self, rho):
+        if self.chop > 0:
+            rho_extended = numpy.zeros(self.V.shape, dtype=numpy.complex128)
+            rho_extended[:self.chop,:self.chop] = rho
+            return self.V @ rho_extended @ self.V_dag
+        else:
+            return self.V @ rho @ self.V_dag
+        
 
-def create_holstein_solver_via_diagonalization(e_0, omega, lamda, N, Gamma, mu_L, mu_R, T_L, T_R, include_digamma=True):
+def create_holstein_solver_via_diagonalization(e_0, omega, lamda, N, Gamma, mu_L, mu_R, T_L, T_R, include_digamma=True, chop=-1):
     d_op = numpy.array([[0, 1], [0, 0]])
     d_dag = numpy.transpose(d_op)
     d_op = numpy.kron(d_op, numpy.identity(N))
@@ -372,7 +373,7 @@ def create_holstein_solver_via_diagonalization(e_0, omega, lamda, N, Gamma, mu_L
     
     #print(H_s)
     
-    return BornMarkovSolver(H_s, [d_op], [a_op], numpy.array([[Gamma]]), numpy.array([mu_L, mu_R]), numpy.array([T_L, T_R]), include_digamma=include_digamma)
+    return BornMarkovSolver(H_s, [d_op], [a_op], numpy.array([[Gamma]]), numpy.array([mu_L, mu_R]), numpy.array([T_L, T_R]), include_digamma=include_digamma, chop=chop)
     
     
 def create_holstein_solver_via_polaron_transformation(e_0, omega, lamda, N, Gamma, mu_L, mu_R, T_L, T_R, include_digamma=True):
