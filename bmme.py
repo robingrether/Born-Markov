@@ -339,22 +339,31 @@ class BornMarkovSolver:
                     part1 = (self.d_op_omega[j][k].getH() @ rho @ self.d_op_omega[i][k]).trace() * self.gamma1_K(i, j, lead, self.frequency[k])
                     part2 = (rho @ self.d_op_omega[j][k].getH() @ self.d_op_omega[i][k]).trace() * self.gamma2_K(i, j, lead, self.frequency[k])
                     val += part1 - part2 - numpy.conjugate(part2) + numpy.conjugate(part1)
-        return -0.2434 * val
+        return -243.4 * val
         
     def get_currents(self, rho):
         currents = numpy.zeros(self.number_of_leads, dtype=numpy.complex128)
         for lead in range(self.number_of_leads):
             currents[lead] = self.get_current(rho, lead)
         return currents
-        
+    
     def retransform_rho(self, rho):
+        return self.retransform(rho)
+    
+    def retransform(self, matrix):
         if self.chop > 0:
-            rho_extended = numpy.zeros(self.V.shape, dtype=numpy.complex128)
-            rho_extended[:self.chop,:self.chop] = rho
-            return self.V @ rho_extended @ self.V_dag
+            matrix_extended = numpy.zeros(self.V.shape, dtype=numpy.complex128)
+            matrix_extended[:self.chop,:self.chop] = matrix
+            return self.V @ matrix_extended @ self.V_dag
         else:
-            return self.V @ rho @ self.V_dag
-        
+            return self.V @ matrix @ self.V_dag
+            
+    def transform(self, matrix):
+        transformed = self.V_dag @ matrix @ self.V
+        if self.chop > 0:
+            return transformed[:self.chop,:self.chop]
+        else:
+            return transformed
 
 def create_holstein_solver_via_diagonalization(e_0, omega, lamda, N, Gamma, mu_L, mu_R, T_L, T_R, include_digamma=True, chop=-1):
     d_op = numpy.array([[0, 1], [0, 0]])
@@ -416,3 +425,110 @@ def create_holstein_solver_via_polaron_transformation(e_0, omega, lamda, N, Gamm
     
     return BornMarkovSolver(H_s, [d_transformed], [a_op], numpy.array([[Gamma]]), numpy.array([mu_L, mu_R]), numpy.array([T_L, T_R]), include_digamma=include_digamma)
 
+
+def calc_langevin_quantities_symmetric_potential(H_S_func, ddx_H_S_func, x, d_ops, a_ops, Gammas, voltages, T_L, T_R, method="analytic"):
+    xs = len(x)
+    vs = len(voltages)
+    
+    mean_force = numpy.zeros((vs, xs), dtype=numpy.complex128)
+    friction = numpy.zeros((vs, xs, xs), dtype=numpy.complex128)
+    correlation = numpy.zeros((vs, xs, xs), dtype=numpy.complex128)
+    currents = numpy.zeros((vs, 2), dtype=numpy.complex128)
+    
+    solver = BornMarkovSolver(H_S_func(x), d_ops, a_ops, Gammas, numpy.array([0.0] * 2), numpy.array([T_L, T_R]))
+    rho_ss = []
+    L_inv = []
+    L = []
+    
+    for i, voltage in enumerate(voltages):
+        solver.chemical_potential = numpy.array([-.5 * voltage, .5 * voltage])
+        solver.construct_liouvillian()
+        local_rho_ss = solver.find_steady_state()
+        rho_ss.append(local_rho_ss)
+        currents[i] = solver.get_currents(local_rho_ss)
+        
+        if method == "pinv":
+            L = solver.sparse_L.toarray(order='C')
+            L_inv.append(linalg.pinv2(L))
+            n2 = L.shape[0]
+            del L
+            gc.collect()
+            
+        elif method == "analytic":
+            L = solver.sparse_L.toarray(order='C')
+            Lw, LV = linalg.eig(L)
+            LV_inv = scipy.linalg.inv(LV)
+            index = numpy.argmin(numpy.abs(Lw))
+            Lw_inv = -1 / Lw
+            Lw_inv[index] = 0.
+            expLw = numpy.diag(Lw_inv)
+            L_inv.append(-LV @ expLw @ LV_inv)
+            n2 = L.shape[0]
+            del L
+            gc.collect()
+        
+        elif method == "solve":
+            L.append(solver.sparse_L)
+            n2 = solver.sparse_L.shape[0]
+    
+    for nu in range(xs):
+        
+        ddx_H_S_nu = solver.transform(ddx_H_S_func(nu, x))
+        
+        dx = 1e-4
+        vec_dx = numpy.zeros(xs)
+        vec_dx[nu] = dx
+        
+        solver2 = []
+        
+        for j in [-2, -1, 1, 2]:
+            local_H_S = H_S_func(x + j*vec_dx)
+            solver2.append(BornMarkovSolver(local_H_S, d_ops, a_ops, Gammas, numpy.array([0.0] * 2), numpy.array([T_L, T_R])))
+        
+        for i, voltage in enumerate(voltages):
+            
+            mean_force[i, nu] = -numpy.trace(ddx_H_S_nu @ rho_ss[i])
+            
+            rhos = []
+            for j in range(4):
+                solver2[j].chemical_potential = numpy.array([-.5 * voltage, .5 * voltage])
+                solver2[j].construct_liouvillian()
+                local_rho_ss = solver2[j].find_steady_state()
+                rhos.append(solver2[j].retransform(local_rho_ss))
+            coeff = [1/12, -2/3, 2/3, -1/12]
+            ddx_rho = numpy.zeros(rhos[0].shape, dtype=numpy.complex128)
+            for rho, c in zip(rhos, coeff):
+                ddx_rho += rho * c
+            ddx_rho /= dx
+            ddx_rho = solver.transform(ddx_rho)
+            
+            for alpha in range(xs):
+                
+                ddx_H_S_alpha = solver.transform(ddx_H_S_func(alpha, x))
+                
+                if method == "pinv":
+                    friction[i, alpha, nu] = numpy.trace(ddx_H_S_alpha @ ((L_inv[i] @ ddx_rho.flatten(order='F')).reshape(ddx_rho.shape, order='F')))
+                    correlation[i, alpha, nu] = -0.5 * numpy.trace(ddx_H_S_alpha @ ((L_inv[i] @ (numpy.kron(numpy.identity(rho_ss[i].shape[0]), ddx_H_S_nu) + numpy.kron(numpy.transpose(ddx_H_S_nu), numpy.identity(rho_ss[i].shape[0])) + 2 * mean_force[i, nu] * numpy.identity(n2)) @ rho_ss[i].flatten(order='F')).reshape(rho_ss[i].shape, order='F')))
+                    
+                elif method == "analytic":
+                    friction[i, alpha, nu] = numpy.trace(ddx_H_S_alpha @ ((L_inv[i] @ ddx_rho.flatten(order='F')).reshape(ddx_rho.shape, order='F')), dtype=numpy.complex128)
+                    correlation[i, alpha, nu] = -0.5 * numpy.trace(ddx_H_S_alpha @ ((L_inv[i] @ (numpy.kron(numpy.identity(rho_ss[i].shape[0]), ddx_H_S_nu) + numpy.kron(numpy.transpose(ddx_H_S_nu), numpy.identity(rho_ss[i].shape[0])) + 2 * mean_force[i, nu] * numpy.identity(n2)) @ rho_ss[i].flatten(order='F')).reshape(rho_ss[i].shape, order='F')), dtype=numpy.complex128)
+                
+                #elif method == "numerical":
+                #    friction[i, alpha, nu] = integrate.quad(lambda lamda: numpy.trace(ddx_H_S_alpha @ ((-linalg.expm(L * lamda) @ ddx_rho.flatten(order='F')).reshape(ddx_rho.shape, order='F')), dtype=numpy.float64), 0, integral_lim)[0]
+                #    correlation[i, alpha, nu] = -0.5 * integrate.quad(lambda lamda: numpy.trace(ddx_H_S_alpha @ ((-linalg.expm(L * lamda) @ (numpy.kron(numpy.identity(rho_ss.shape[0]), ddx_H_S_nu) + numpy.kron(numpy.transpose(ddx_H_S_nu), numpy.identity(rho_ss.shape[0])) + 2 * mean_force[i, nu] * numpy.identity(L.shape[0])) @ rho_ss.flatten(order='F')).reshape(rho_ss.shape, order='F')), dtype=numpy.float64), 0, integral_lim)[0]
+                
+                elif method == "solve":
+                    elem1 = ddx_rho.flatten(order='F')
+                    elem2 = (numpy.kron(numpy.identity(rho_ss[i].shape[0]), ddx_H_S_nu) + numpy.kron(numpy.transpose(ddx_H_S_nu), numpy.identity(rho_ss[i].shape[0])) + 2 * mean_force[i, nu] * numpy.identity(n2)) @ rho_ss[i].flatten(order='F')
+                    
+                    L_dense = L[i].toarray(order='C')
+                    inv1 = linalg.lstsq(L_dense, elem1)[0]
+                    inv2 = linalg.lstsq(L_dense, elem2)[0]
+                    del L_dense
+                    gc.collect()
+                
+                    friction[i, alpha, nu] = numpy.trace(ddx_H_S_alpha @ (inv1.reshape(ddx_rho.shape, order='F')), dtype=numpy.complex128)
+                    correlation[i, alpha, nu] = -0.5 * numpy.trace(ddx_H_S_alpha @ (inv2.reshape(rho_ss[i].shape, order='F')), dtype=numpy.complex128)
+    
+    return mean_force, friction, correlation, currents
